@@ -1,7 +1,7 @@
 {
-  "name": "Sixty: 60-Day Challenge",
+  "name": "Sixty: Challenge Tracker",
   "short_name": "Sixty",
-  "description": "Habits, macros, training, and weight for a 60-day lean bulk.",
+  "description": "Habits, macros, training, and weight for a lean bulk challenge.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

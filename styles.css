@@ -315,3 +315,10 @@ details.workout summary::-webkit-details-marker { display: none; }
   * { animation: none !important; transition: none !important; }
 }
 h1 .of { color: var(--muted); font-weight: 700; }
+
+/* ---------- Schedule editor ---------- */
+.ex-edit { background: var(--surface); border-radius: var(--radius); padding: 10px; }
+.ex-edit .icon-btn { width: 40px; }
+.list-edit .sch-row { width: 100%; min-height: 52px; background: none; border: 0; border-bottom: 1px solid var(--line); text-align: left; padding: 8px 14px; gap: 10px; }
+.list-edit .sch-row:last-child { border-bottom: 0; }
+.list-edit .sch-row .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

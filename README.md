@@ -1,4 +1,4 @@
-# Sixty: a 60-day challenge tracker
+# Sixty: a challenge tracker (Day 0 Oct 25 → Day 56 Dec 20)
 
 Plain HTML/CSS/JS PWA. No build step and no backend. Data lives in `localStorage` on your device.
 

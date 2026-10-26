@@ -1,5 +1,5 @@
 // Bump VERSION whenever you change any app file so phones pick up the update.
-const VERSION = 'sixty-v1';
+const VERSION = 'sixty-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -12,7 +12,7 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
@@ -23,6 +23,7 @@ self.addEventListener('activate', e => {
   );
 });
 
+// Bypass the browser's HTTP cache (GitHub Pages caches for 10 min) so updates arrive promptly.
 // Stale-while-revalidate: serve from cache instantly (fast + offline), refresh in the background.
 self.addEventListener('fetch', e => {
   const req = e.request;
@@ -31,7 +32,7 @@ self.addEventListener('fetch', e => {
     caches.open(VERSION).then(async cache => {
       const cached = await cache.match(req, { ignoreSearch: true }) ||
         (req.mode === 'navigate' ? await cache.match('./index.html') : undefined);
-      const fresh = fetch(req)
+      const fresh = fetch(req, { cache: 'no-cache' })
         .then(res => { if (res.ok) cache.put(req, res.clone()); return res; })
         .catch(() => cached);
       return cached || fresh;

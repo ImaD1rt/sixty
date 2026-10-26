@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   const STORE_KEY = 'sixty.v1';
-  const DAYS = 60;
+  const DAY_START_HOUR = 4; // a day runs 4 AM to 4 AM, so late-night logging counts for the day before
   const DAY_MS = 86400000;
 
   // ---------- Defaults ----------
@@ -29,20 +29,32 @@
     { id: 'oats', name: 'Oats (1 cup dry)', cal: 300, p: 10 },
   ];
 
+  const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const DOW_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+  // How a set is logged; value is the field list stored on each exercise.
+  const FIELD_TYPES = [
+    ['lb,reps', 'Weight × reps'],
+    ['+lb,reps', 'Bodyweight (+lb) × reps'],
+    ['in,reps', 'Distance/height (in) × reps'],
+    ['reps', 'Reps only'],
+    ['sec', 'Seconds'],
+    ['min', 'Minutes'],
+    ['rounds', 'Rounds'],
+  ];
+
   // Indexed by Date.getDay(): 0 = Sunday. f = the fields logged per set.
-  const SCHEDULE = [
-    { name: 'Rest / Walk / Stretch', short: 'Sun', ex: [
-      { n: 'Walk', sets: 1, target: 'easy', f: ['min'] },
-      { n: 'Stretch / mobility', sets: 1, target: '10–15 min', f: ['min'] },
-    ] },
-    { name: 'Lower + Power', short: 'Mon', ex: [
+  // rest: true makes the "Trained" habit count as done automatically.
+  const DEFAULT_SCHEDULE = [
+    { name: 'Rest', rest: true, ex: [] },
+    { name: 'Lower + Power', ex: [
       { n: 'Box jumps', sets: 4, target: '4×3', f: ['in', 'reps'] },
       { n: 'Back squat', sets: 4, target: '4×6', f: ['lb', 'reps'] },
       { n: 'Romanian deadlift', sets: 3, target: '3×8', f: ['lb', 'reps'] },
       { n: 'Walking lunges', sets: 3, target: '3×10/leg', f: ['lb', 'reps'] },
       { n: 'Calf raises', sets: 3, target: '3×15', f: ['lb', 'reps'] },
     ] },
-    { name: 'Upper', short: 'Tue', ex: [
+    { name: 'Upper', ex: [
       { n: 'Bench press', sets: 4, target: '4×6', f: ['lb', 'reps'] },
       { n: 'Pull-ups', sets: 4, target: '4×max', f: ['+lb', 'reps'] },
       { n: 'Overhead press', sets: 3, target: '3×8', f: ['lb', 'reps'] },
@@ -50,42 +62,45 @@
       { n: 'Curls', sets: 2, target: '2×12', f: ['lb', 'reps'] },
       { n: 'Triceps', sets: 2, target: '2×12', f: ['lb', 'reps'] },
     ] },
-    { name: 'Easy Cardio', short: 'Wed', ex: [
-      { n: 'Easy cardio', sets: 1, target: '30–40 min', f: ['min'] },
+    { name: 'Conditioning', ex: [
+      { n: 'Intervals: 30s hard / 90s easy (bike, hill sprints, or rower)', sets: 1, target: '8 rounds', f: ['rounds'] },
+      { n: 'Easy cardio', sets: 1, target: '15–20 min', f: ['min'] },
     ] },
-    { name: 'Lower + Speed', short: 'Thu', ex: [
+    { name: 'Lower + Speed', ex: [
       { n: '20m sprints', sets: 6, target: '6×20m', f: ['sec'] },
       { n: 'Broad jumps', sets: 4, target: '4×3', f: ['in', 'reps'] },
       { n: 'Trap bar deadlift', sets: 4, target: '4×5', f: ['lb', 'reps'] },
       { n: 'Bulgarian split squats', sets: 3, target: '3×8/leg', f: ['lb', 'reps'] },
       { n: 'Plank', sets: 3, target: '3×45s', f: ['sec'] },
     ] },
-    { name: 'Upper', short: 'Fri', ex: [
+    { name: 'Upper', ex: [
       { n: 'Incline DB press', sets: 4, target: '4×8', f: ['lb', 'reps'] },
       { n: 'Chin-ups', sets: 4, target: '4×max', f: ['+lb', 'reps'] },
       { n: 'Dips', sets: 3, target: '3×10', f: ['+lb', 'reps'] },
       { n: 'Lateral raises', sets: 3, target: '3×15', f: ['lb', 'reps'] },
       { n: 'Face pulls', sets: 3, target: '3×15', f: ['lb', 'reps'] },
     ] },
-    { name: 'Conditioning', short: 'Sat', ex: [
-      { n: 'Intervals: 30s hard / 90s easy', sets: 1, target: '8 rounds', f: ['rounds'] },
-      { n: 'Easy cardio finisher', sets: 1, target: '20 min', f: ['min'] },
+    { name: 'Rest: walk, stretch, or optional sport', rest: true, ex: [
+      { n: 'Walk / stretch / sport', sets: 1, target: 'optional', f: ['min'] },
     ] },
   ];
+  const cloneSchedule = sch => sch.map(sc => ({ ...sc, ex: sc.ex.map(e => ({ ...e, f: [...e.f] })) }));
 
   const defaultState = () => ({
-    v: 1,
+    v: 2,
     settings: {
       startDate: '2026-10-25',
+      endDate: '2026-12-20',
       calTarget: 3000,
       proteinTarget: 160,
-      startWeight: 155,
-      goalWeight: 162,
+      startWeight: 160,
+      goalWeight: 175,
       bedtime: '23:00',
       theme: 'dark',
     },
     habits: DEFAULT_HABITS.map(h => ({ ...h })),
     foods: DEFAULT_FOODS.map(f => ({ ...f })),
+    schedule: cloneSchedule(DEFAULT_SCHEDULE),
     days: {},
     urgesBeaten: 0,
   });
@@ -100,13 +115,23 @@
   }
   function normalize(s) {
     const d = defaultState();
-    return {
+    const out = {
       ...d, ...s,
       settings: { ...d.settings, ...s.settings },
       habits: Array.isArray(s.habits) ? s.habits : d.habits,
       foods: Array.isArray(s.foods) ? s.foods : d.foods,
+      schedule: Array.isArray(s.schedule) && s.schedule.length === 7 ? s.schedule : d.schedule,
       days: s.days && typeof s.days === 'object' ? s.days : {},
     };
+    // v1 → v2: new weight goal, unless it was already changed by hand.
+    if (!(s.v >= 2)) {
+      if (out.settings.startWeight === 155 && out.settings.goalWeight === 162) {
+        out.settings.startWeight = 160;
+        out.settings.goalWeight = 175;
+      }
+      out.v = 2;
+    }
+    return out;
   }
   let saveTimer;
   function save() {
@@ -130,11 +155,13 @@
   const parse = k => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d); };
   const addDays = (k, n) => { const d = parse(k); d.setDate(d.getDate() + n); return keyOf(d); };
   const diffDays = (a, b) => Math.round((parse(b) - parse(a)) / DAY_MS);
-  const todayKey = () => keyOf(new Date());
+  const todayKey = () => keyOf(new Date(Date.now() - DAY_START_HOUR * 3600000));
   const curKey = () => ui.viewDate || todayKey();
-  const startKey = () => state.settings.startDate;
-  const endKey = () => addDays(startKey(), DAYS - 1);
-  const dayNum = k => diffDays(startKey(), k) + 1;
+  const startKey = () => state.settings.startDate; // Day 0
+  const endKey = () => state.settings.endDate;
+  const lastDay = () => Math.max(1, diffDays(startKey(), endKey())); // number of the final day
+  const span = () => lastDay() + 1; // days tracked, including Day 0
+  const dayNum = k => diffDays(startKey(), k);
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const uid = () => Math.random().toString(36).slice(2, 9);
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -162,11 +189,12 @@
   const hasHabit = id => state.habits.some(h => h.id === id);
   // Habits added mid-challenge only count from the day they were added.
   const habitsFor = k => state.habits.filter(h => !h.added || h.added <= k);
+  // On rest days the "Trained" habit is done automatically.
+  const habitDone = (k, id) => !!getDay(k).habits[id] || (id === 'train' && isRest(k));
   function completion(k) {
     const hs = habitsFor(k);
     if (!hs.length) return 0;
-    const d = getDay(k);
-    return hs.filter(h => d.habits[h.id]).length / hs.length;
+    return hs.filter(h => habitDone(k, h.id)).length / hs.length;
   }
   const isComplete = k => habitsFor(k).length > 0 && completion(k) === 1;
 
@@ -182,7 +210,8 @@
   const gambleFree = () => runLength(k => !!getDay(k).habits.nogamble);
 
   const sessionIdx = k => { const d = getDay(k); return Number.isInteger(d.session) ? d.session : parse(k).getDay(); };
-  const sessionFor = k => SCHEDULE[sessionIdx(k)];
+  const sessionFor = k => state.schedule[sessionIdx(k)];
+  const isRest = k => !!sessionFor(k).rest;
 
   function totals(k) {
     return getDay(k).food.reduce((t, f) => {
@@ -221,6 +250,7 @@
   function closeSheet() {
     $('#sheet-root').innerHTML = '';
     stopUrgeTick();
+    render();
   }
   const sheetHead = title => `<div class="sheet-head"><h3>${title}</h3><button class="icon-btn" data-action="close-sheet" aria-label="Close">✕</button></div>`;
 
@@ -248,7 +278,10 @@
   function habitHint(h, k) {
     const s = state.settings;
     if (h.id === 'protein') return `${Math.round(totals(k).p)} / ${s.proteinTarget} g logged`;
-    if (h.id === 'train') return sessionFor(k).name;
+    if (h.id === 'train') {
+      const sess = sessionFor(k);
+      return sess.rest && sess.name.toLowerCase() === 'rest' ? 'Counts automatically' : sess.name;
+    }
     if (h.id === 'sleep') return `Target: ${fmtTime(s.bedtime)}`;
     return '';
   }
@@ -256,23 +289,24 @@
   function viewToday() {
     const k = curKey(), s = state.settings, n = dayNum(k), d = getDay(k);
     let headline;
-    if (n < 1) headline = `Starts in ${plural(1 - n, 'day')}`;
-    else if (n > DAYS) headline = 'Challenge complete';
-    else headline = `Day ${n} <span class="of">of ${DAYS}</span>`;
-    const pct = clamp(n / DAYS, 0, 1) * 100;
+    if (n < 0) headline = `Starts in ${plural(-n, 'day')}`;
+    else if (n > lastDay()) headline = 'Challenge complete';
+    else headline = `Day ${n} <span class="of">of ${lastDay()}</span>`;
+    const pct = clamp(n / lastDay(), 0, 1) * 100;
 
     const hs = habitsFor(k);
-    const done = hs.filter(h => d.habits[h.id]).length;
+    const done = hs.filter(h => habitDone(k, h.id)).length;
     const habits = hs.map(h => {
-      const on = !!d.habits[h.id];
+      const on = habitDone(k, h.id);
+      const restTrain = h.id === 'train' && isRest(k);
       const hint = habitHint(h, k);
       return `<button class="habit${on ? ' on' : ''}" data-action="habit" data-id="${esc(h.id)}" aria-pressed="${on}">
         <span class="check">${CHECK_SVG}</span>
-        <span class="grow"><div class="label">${esc(h.name)}</div>${hint ? `<div class="hint">${esc(hint)}</div>` : ''}</span>
+        <span class="grow"><div class="label">${restTrain ? 'Rest day' : esc(h.name)}</div>${hint ? `<div class="hint">${esc(hint)}</div>` : ''}</span>
       </button>`;
     }).join('');
 
-    const sess = sessionFor(k);
+    const sess = sessionFor(k), idx = sessionIdx(k);
     const t = totals(k);
     const w = d.weight;
 
@@ -287,7 +321,7 @@
       <div class="stats">
         <div class="stat"><b>${streak()}</b><span>day streak</span></div>
         ${hasHabit('nogamble')
-          ? `<div class="stat"><b>${gambleFree()}</b><span>days gambling-free</span></div>`
+          ? `<div class="stat"><b>${gambleFree()}</b><span>${gambleFree() === 1 ? 'day' : 'days'} gambling-free</span></div>`
           : `<div class="stat"><b>${done}/${hs.length}</b><span>done today</span></div>`}
       </div>
 
@@ -296,13 +330,13 @@
 
       <h2>Session</h2>
       <div class="card">
-        <span class="tag">${sess.short}</span>
+        <span class="tag">${DOW[idx]}${sess.rest ? ' · Rest day' : ''}</span>
         <div class="session-title">${esc(sess.name)}</div>
-        <details class="workout">
-          <summary>Full workout ▾</summary>
+        ${sess.ex.length ? `<details class="workout">
+          <summary>${sess.rest ? 'Optional' : 'Full workout'} ▾</summary>
           <ul class="exlist">${sess.ex.map(e => `<li><span>${esc(e.n)}</span><span>${esc(e.target)}</span></li>`).join('')}</ul>
           <button class="btn primary block" style="margin-top:12px" data-action="go" data-to="train">Log workout</button>
-        </details>
+        </details>` : '<div class="sub" style="margin-top:4px">Recover: eat, sleep, hit your protein.</div>'}
       </div>
 
       <h2>Macros</h2>
@@ -417,8 +451,8 @@
 
   function viewTrain() {
     const k = curKey(), d = getDay(k);
-    const idx = sessionIdx(k), sess = SCHEDULE[idx], dflt = parse(k).getDay();
-    const chips = SCHEDULE.map((sc, i) => `<button class="chip${i === idx ? ' on' : ''}${i === dflt ? ' today' : ''}" data-action="session-pick" data-idx="${i}">${sc.short}</button>`).join('');
+    const idx = sessionIdx(k), sess = state.schedule[idx], dflt = parse(k).getDay();
+    const chips = state.schedule.map((sc, i) => `<button class="chip${i === idx ? ' on' : ''}${i === dflt ? ' today' : ''}" data-action="session-pick" data-idx="${i}">${DOW[i]}</button>`).join('');
     const doneOn = !!d.habits.train;
 
     const cards = sess.ex.map((ex, ei) => {
@@ -446,11 +480,57 @@
 
     return `
       ${viewingBanner()}
-      <header class="dayhead"><div class="eyebrow">${fmtLong(k)}</div><h1>${esc(sess.name)}</h1></header>
+      <header class="dayhead row spread">
+        <div class="grow"><div class="eyebrow">${fmtLong(k)}</div><h1>${esc(sess.name)}</h1></div>
+        <button class="btn sm" data-action="sch-edit" data-day="${idx}">Edit</button>
+      </header>
       <div class="chips" role="group" aria-label="Choose session">${chips}</div>
-      ${cards}
-      ${hasHabit('train') ? `<button class="btn block ${doneOn ? '' : 'primary'}" data-action="habit" data-id="train">${doneOn ? 'Session done ✓ (tap to undo)' : 'Mark session done'}</button>` : ''}
+      ${sess.rest ? `<div class="hint-box" style="margin:0 0 12px"><b>Rest day</b>“Trained” counts as done automatically.${sess.ex.length ? ' Anything below is optional.' : ''}</div>` : ''}
+      ${cards || (sess.rest ? '' : `<div class="empty">No exercises for ${DOW_LONG[idx]}. Tap Edit to add some.</div>`)}
+      ${hasHabit('train') && !sess.rest ? `<button class="btn block ${doneOn ? '' : 'primary'}" data-action="habit" data-id="train">${doneOn ? 'Session done ✓ (tap to undo)' : 'Mark session done'}</button>` : ''}
     `;
+  }
+
+  // ---------- Schedule editor ----------
+  function scheduleSheet(di, keepScroll) {
+    const prev = keepScroll && $('.sheet') ? $('.sheet').scrollTop : 0;
+    const sc = state.schedule[di];
+    const rows = sc.ex.map((ex, ei) => `<div class="ex-edit">
+        <div class="row" style="gap:6px">
+          <input class="input grow" value="${esc(ex.n)}" data-sch="${di}" data-ei="${ei}" data-key="n" aria-label="Exercise name">
+          <button class="icon-btn" data-action="sch-ex-move" data-day="${di}" data-ei="${ei}" data-dir="-1" ${ei === 0 ? 'disabled' : ''} aria-label="Move up">↑</button>
+          <button class="icon-btn" data-action="sch-ex-move" data-day="${di}" data-ei="${ei}" data-dir="1" ${ei === sc.ex.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
+          <button class="icon-btn plain" data-action="sch-ex-del" data-day="${di}" data-ei="${ei}" aria-label="Remove exercise">✕</button>
+        </div>
+        <div class="grid2" style="grid-template-columns:1fr 80px;margin-top:8px">
+          <label class="field"><span>Target</span><input class="input" value="${esc(ex.target)}" placeholder="e.g. 4×6" data-sch="${di}" data-ei="${ei}" data-key="target"></label>
+          <label class="field"><span>Sets</span><input class="input num" type="number" inputmode="numeric" min="1" max="12" value="${ex.sets}" data-sch="${di}" data-ei="${ei}" data-key="sets"></label>
+        </div>
+        <label class="field" style="margin:0"><span>Log as</span><select class="input" data-sch="${di}" data-ei="${ei}" data-key="f">
+          ${FIELD_TYPES.map(([v, label]) => `<option value="${v}"${ex.f.join(',') === v ? ' selected' : ''}>${label}</option>`).join('')}
+        </select></label>
+      </div>`).join('');
+    openSheet(`${sheetHead(DOW_LONG[di])}
+      <label class="field"><span>Session name</span><input class="input" value="${esc(sc.name)}" data-sch="${di}" data-key="name"></label>
+      <label class="checkline"><input type="checkbox" data-sch="${di}" data-key="rest"${sc.rest ? ' checked' : ''}> Rest day (“Trained” counts automatically)</label>
+      <h2>Exercises</h2>
+      <div class="stack">${rows || '<div class="empty">No exercises.</div>'}</div>
+      <button class="btn block" style="margin-top:8px" data-action="sch-ex-add" data-day="${di}">+ Add exercise</button>
+      <div class="grid2" style="margin-top:16px">
+        <button class="btn ghost" data-action="sch-reset" data-day="${di}">Reset day</button>
+        <button class="btn primary" data-action="close-sheet">Done</button>
+      </div>
+      <p class="sub" style="margin-top:12px">“Last session” numbers follow the exercise name, so renaming keeps its history.</p>`, true);
+    if (prev) $('.sheet').scrollTop = prev;
+  }
+
+  // Move logged sets to the new name, unless another day still uses the old one.
+  function renameLogs(from, to) {
+    const uses = state.schedule.reduce((n, sc) => n + sc.ex.filter(e => e.n === from).length, 0);
+    if (uses > 1) return;
+    for (const d of Object.values(state.days)) {
+      if (d.workout && d.workout[from] && !d.workout[to]) { d.workout[to] = d.workout[from]; delete d.workout[from]; }
+    }
   }
 
   // ---------- Progress ----------
@@ -460,12 +540,12 @@
   function weightSeries() {
     const s = state.settings, t = todayKey();
     const pts = [];
-    for (let i = 0; i < DAYS; i++) {
+    for (let i = 0; i < span(); i++) {
       const k = addDays(startKey(), i);
       pts.push({ i, k, w: (state.days[k] && state.days[k].weight) || null });
     }
     const lastIdx = pts.reduce((m, p) => (p.w ? p.i : m), -1);
-    const step = (s.goalWeight - s.startWeight) / (DAYS - 1);
+    const step = (s.goalWeight - s.startWeight) / (span() - 1);
     for (const p of pts) {
       p.target = s.startWeight + step * p.i;
       p.avg = null;
@@ -484,7 +564,8 @@
     let step = 1;
     while ((hi - lo) / step > 6) step *= 2;
     lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
-    const X = i => L + (i / (DAYS - 1)) * (W - L - R);
+    const N = pts.length - 1;
+    const X = i => L + (i / N) * (W - L - R);
     const Y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
     chartY = { X, Y };
 
@@ -492,7 +573,7 @@
     for (let v = lo; v <= hi; v += step) {
       grid += `<line class="grid" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${v}</text>`;
     }
-    const ticks = [0, 14, 29, 44, 59].map(i => `<text x="${X(i)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === 59 ? 'end' : 'middle'}">${fmtShort(pts[i].k)}</text>`).join('');
+    const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => Math.round(f * N)).map(i => `<text x="${X(i)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === N ? 'end' : 'middle'}">${fmtShort(pts[i].k)}</text>`).join('');
 
     let path = '', pen = false;
     for (const p of pts) {
@@ -502,9 +583,9 @@
     }
     const dots = pts.filter(p => p.w).map(p => `<circle class="dot" cx="${X(p.i)}" cy="${Y(p.w)}" r="4"/>`).join('');
 
-    return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Bodyweight over the 60 days with 7-day average and target line">
+    return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Bodyweight over the challenge with 7-day average and target line">
       ${grid}${ticks}
-      <line class="target" x1="${X(0)}" y1="${Y(pts[0].target)}" x2="${X(DAYS - 1)}" y2="${Y(pts[DAYS - 1].target)}"/>
+      <line class="target" x1="${X(0)}" y1="${Y(pts[0].target)}" x2="${X(N)}" y2="${Y(pts[N].target)}"/>
       ${dots}
       <path class="avg" d="${path}"/>
       <line class="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" style="display:none"/>
@@ -528,12 +609,16 @@
     const ok = a => a && a.n >= 3;
     const weekly = ok(a0) && ok(a1) ? a0.avg - a1.avg : null;
     const twoWeek = ok(a0) && ok(a2) ? a0.avg - a2.avg : null;
-    const rate = (s.goalWeight - s.startWeight) / (DAYS / 7);
+    const rate = (s.goalWeight - s.startWeight) / (lastDay() / 7);
+    // "Too fast" scales with the goal: 1 lb/week, or half a pound over target pace if the goal needs more.
+    const fast = Math.max(1, rate + 0.5);
     let hint;
-    if (weekly != null && weekly > 1) {
+    if (weekly != null && weekly > fast) {
       hint = { title: 'Gaining fast', body: `Up ${weekly.toFixed(1)} lb this week. Eat ~200 cal less per day.` };
     } else if (twoWeek != null && twoWeek < 0.3) {
       hint = { title: 'Scale hasn’t moved in 2 weeks', body: 'Eat ~200 cal more per day.' };
+    } else if (weekly != null && weekly < rate - 0.5) {
+      hint = { title: 'Behind pace', body: `Up ${weekly.toFixed(1)} lb this week vs ~${rate.toFixed(1)} target. Eat ~200 cal more per day.` };
     } else if (weekly != null) {
       hint = { title: 'On track', body: `Target pace is ~${rate.toFixed(1)} lb/week. Keep it steady.` };
     } else {
@@ -547,7 +632,7 @@
     const offset = parse(start).getDay();
     let cells = ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map(d => `<div class="dow">${d}</div>`).join('');
     for (let i = 0; i < offset; i++) cells += '<div></div>';
-    for (let i = 0; i < DAYS; i++) {
+    for (let i = 0; i < span(); i++) {
       const k = addDays(start, i);
       const dt = parse(k);
       const label = dt.getDate();
@@ -623,11 +708,12 @@
     const show = e => {
       const r = svg.getBoundingClientRect();
       const sx = (e.clientX - r.left) * (W / r.width);
-      const i = clamp(Math.round(((sx - L) / (W - L - R)) * (DAYS - 1)), 0, DAYS - 1);
+      const N = chartPts.length - 1;
+      const i = clamp(Math.round(((sx - L) / (W - L - R)) * N), 0, N);
       const p = chartPts[i];
       const x = chartY.X(i);
       cross.setAttribute('x1', x); cross.setAttribute('x2', x); cross.style.display = '';
-      tip.innerHTML = `<b>${fmtShort(p.k)} · Day ${i + 1}</b>${p.w ? `Weight ${p.w.toFixed(1)} lb` : 'No weigh-in'}<br>${p.avg ? `7-day avg ${p.avg.toFixed(1)}<br>` : ''}Target ${p.target.toFixed(1)}`;
+      tip.innerHTML = `<b>${fmtShort(p.k)} · Day ${i}</b>${p.w ? `Weight ${p.w.toFixed(1)} lb` : 'No weigh-in'}<br>${p.avg ? `7-day avg ${p.avg.toFixed(1)}<br>` : ''}Target ${p.target.toFixed(1)}`;
       tip.hidden = false;
       const half = tip.offsetWidth / 2 + 4;
       tip.style.left = clamp(x * r.width / W, half, r.width - half) + 'px';
@@ -671,16 +757,25 @@
           <label class="field"><span>Protein / day (g)</span><input class="input num" type="number" inputmode="numeric" value="${s.proteinTarget}" data-setting="proteinTarget"></label>
           <label class="field"><span>Start weight (lb)</span><input class="input num" type="number" inputmode="decimal" step="0.1" value="${s.startWeight}" data-setting="startWeight"></label>
           <label class="field"><span>Goal weight (lb)</span><input class="input num" type="number" inputmode="decimal" step="0.1" value="${s.goalWeight}" data-setting="goalWeight"></label>
-          <label class="field"><span>Start date</span><input class="input" type="date" value="${s.startDate}" data-setting="startDate"></label>
+          <label class="field"><span>Start (Day 0)</span><input class="input" type="date" value="${s.startDate}" data-setting="startDate"></label>
+          <label class="field"><span>End date</span><input class="input" type="date" value="${s.endDate}" data-setting="endDate"></label>
           <label class="field"><span>Bedtime target</span><input class="input" type="time" value="${s.bedtime}" data-setting="bedtime"></label>
         </div>
-        <div class="sub">Challenge runs ${fmtDay(startKey())} → ${fmtDay(endKey())}.</div>
+        <div class="sub">Day 0 is ${fmtDay(startKey())}, Day ${lastDay()} is ${fmtDay(endKey())}. Days roll over at 4 AM.</div>
       </div>
 
       <h2>Habits</h2>
       <div class="list-edit">${habits}
         <div class="item"><input class="input grow" id="new-habit" placeholder="New habit" aria-label="New habit name">
           <button class="btn sm primary" data-action="habit-add">Add</button></div>
+      </div>
+
+      <h2>Workout schedule</h2>
+      <div class="list-edit">${state.schedule.map((sc, i) => `<button class="item sch-row" data-action="sch-edit" data-day="${i}">
+          <b style="width:40px;flex:none">${DOW[i]}</b>
+          <span class="grow">${esc(sc.name)}</span>
+          <span class="sub">${sc.rest ? 'Rest' : plural(sc.ex.length, 'exercise')} ›</span>
+        </button>`).join('')}
       </div>
 
       <h2>Quick-add foods</h2>
@@ -823,6 +918,7 @@
     switch (a) {
       case 'habit': {
         const d = day(k), id = el.dataset.id;
+        if (id === 'train' && isRest(k)) { toast('Rest day: this one counts automatically'); break; }
         d.habits[id] = !d.habits[id];
         if (id === 'protein') d.autoProtein = false;
         save(); buzz(); render();
@@ -872,6 +968,40 @@
         while (sets.length < ex.sets) sets.push(ex.f.map(() => ''));
         sets.push(ex.f.map(() => ''));
         save(); render();
+        break;
+      }
+      case 'sch-edit': scheduleSheet(Number(el.dataset.day)); break;
+      case 'sch-ex-add': {
+        const di = Number(el.dataset.day), sc = state.schedule[di];
+        let name = 'New exercise', n = 2;
+        while (sc.ex.some(e => e.n === name)) name = `New exercise ${n++}`;
+        sc.ex.push({ n: name, sets: 3, target: '3×10', f: ['lb', 'reps'] });
+        save(); scheduleSheet(di);
+        const sheet = $('.sheet'); sheet.scrollTop = sheet.scrollHeight;
+        const inputs = sheet.querySelectorAll('[data-key="n"]');
+        inputs[inputs.length - 1].select();
+        break;
+      }
+      case 'sch-ex-move': {
+        const di = Number(el.dataset.day), ex = state.schedule[di].ex;
+        const i = Number(el.dataset.ei), j = i + Number(el.dataset.dir);
+        if (j < 0 || j >= ex.length) break;
+        [ex[i], ex[j]] = [ex[j], ex[i]];
+        save(); scheduleSheet(di, true);
+        break;
+      }
+      case 'sch-ex-del': {
+        const di = Number(el.dataset.day), snap = snapshot();
+        const [gone] = state.schedule[di].ex.splice(Number(el.dataset.ei), 1);
+        save(); scheduleSheet(di, true);
+        toast(`Removed ${gone.n}`, () => { restorer(snap)(); scheduleSheet(di, true); });
+        break;
+      }
+      case 'sch-reset': {
+        const di = Number(el.dataset.day), snap = snapshot();
+        state.schedule[di] = cloneSchedule([DEFAULT_SCHEDULE[di]])[0];
+        save(); scheduleSheet(di);
+        toast(`${DOW_LONG[di]} reset`, () => { restorer(snap)(); scheduleSheet(di); });
         break;
       }
       case 'theme': state.settings.theme = el.dataset.v; save(); applyTheme(); render(); break;
@@ -966,9 +1096,28 @@
       toast(el.value === '' ? 'Weight cleared' : 'Weight saved');
     } else if (el.dataset.setting) {
       const key = el.dataset.setting, s = state.settings;
-      if (key === 'startDate' || key === 'bedtime') { if (el.value) s[key] = el.value; }
+      if (key === 'startDate' || key === 'endDate') {
+        const next = { ...s, [key]: el.value };
+        if (!el.value || next.endDate <= next.startDate) { toast('End date must be after the start date'); render(); return; }
+        s[key] = el.value;
+      } else if (key === 'bedtime') { if (el.value) s[key] = el.value; }
       else if (num(el.value) > 0) s[key] = num(el.value);
       save(); render();
+    } else if (el.dataset.sch != null) {
+      const sc = state.schedule[Number(el.dataset.sch)], key = el.dataset.key;
+      if (el.dataset.ei == null) {
+        if (key === 'rest') sc.rest = el.checked;
+        else if (el.value.trim()) sc.name = el.value.trim();
+      } else {
+        const ex = sc.ex[Number(el.dataset.ei)], v = el.value.trim();
+        if (key === 'n') {
+          if (!v || sc.ex.some(e => e !== ex && e.n === v)) { el.value = ex.n; toast('Use a different name'); return; }
+          renameLogs(ex.n, v); ex.n = v;
+        } else if (key === 'sets') ex.sets = clamp(Math.round(num(v)) || 1, 1, 12);
+        else if (key === 'target') ex.target = v;
+        else if (key === 'f') ex.f = v.split(',');
+      }
+      save();
     } else if (el.dataset.habitName) {
       const h = state.habits.find(x => x.id === el.dataset.habitName);
       if (h && el.value.trim()) { h.name = el.value.trim(); save(); }
@@ -1000,6 +1149,7 @@
 
   // ---------- Boot ----------
   applyTheme();
+  save(); // persist any data upgrade from an older version
   render();
 
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
