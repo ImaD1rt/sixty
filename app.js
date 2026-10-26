@@ -15,6 +15,7 @@
     { id: 'teethAM', name: 'Brushed teeth AM' },
     { id: 'teethPM', name: 'Brushed teeth PM' },
     { id: 'sleep', name: 'Phone out of bed / asleep by target time' },
+    { id: 'social', name: 'Daily social rep' },
   ];
 
   const DEFAULT_FOODS = [
@@ -87,7 +88,7 @@
   const cloneSchedule = sch => sch.map(sc => ({ ...sc, ex: sc.ex.map(e => ({ ...e, f: [...e.f] })) }));
 
   const defaultState = () => ({
-    v: 2,
+    v: 3,
     settings: {
       startDate: '2026-10-25',
       endDate: '2026-12-20',
@@ -96,22 +97,26 @@
       startWeight: 160,
       goalWeight: 175,
       bedtime: '23:00',
+      rushDate: '',
       theme: 'dark',
     },
     habits: DEFAULT_HABITS.map(h => ({ ...h })),
     foods: DEFAULT_FOODS.map(f => ({ ...f })),
     schedule: cloneSchedule(DEFAULT_SCHEDULE),
     days: {},
+    people: [],
+    events: [],
+    todos: [],
+    preEvent: null,
     urgesBeaten: 0,
   });
 
   // ---------- Storage ----------
+  // Only a corrupt/missing store falls back to defaults; a bug in normalize() must never wipe saved data.
   function load() {
-    try {
-      const s = JSON.parse(localStorage.getItem(STORE_KEY));
-      if (s && s.settings) return normalize(s);
-    } catch (e) {}
-    return defaultState();
+    let s = null;
+    try { s = JSON.parse(localStorage.getItem(STORE_KEY)); } catch (e) {}
+    return s && s.settings ? normalize(s) : defaultState();
   }
   function normalize(s) {
     const d = defaultState();
@@ -122,6 +127,9 @@
       foods: Array.isArray(s.foods) ? s.foods : d.foods,
       schedule: Array.isArray(s.schedule) && s.schedule.length === 7 ? s.schedule : d.schedule,
       days: s.days && typeof s.days === 'object' ? s.days : {},
+      people: Array.isArray(s.people) ? s.people : [],
+      events: Array.isArray(s.events) ? s.events : [],
+      todos: Array.isArray(s.todos) ? s.todos : [],
     };
     // v1 → v2: new weight goal, unless it was already changed by hand.
     if (!(s.v >= 2)) {
@@ -130,6 +138,11 @@
         out.settings.goalWeight = 175;
       }
       out.v = 2;
+    }
+    // v2 → v3: add the daily social rep habit, counted from the day it was added.
+    if (!(s.v >= 3)) {
+      if (!out.habits.some(h => h.id === 'social')) out.habits.push({ id: 'social', name: 'Daily social rep', added: todayKey() });
+      out.v = 3;
     }
     return out;
   }
@@ -144,8 +157,6 @@
     saveTimer = setTimeout(save, 300);
   }
 
-  let state = load();
-  const ui = { tab: 'today', viewDate: null, lastToday: null };
 
   // ---------- Helpers ----------
   const $ = sel => document.querySelector(sel);
@@ -230,6 +241,9 @@
     return false;
   }
 
+  let state = load();
+  const ui = { tab: 'today', viewDate: null, lastToday: null, peopleQuery: '' };
+
   // ---------- Toast & undo ----------
   let toastTimer, pendingUndo = null;
   function toast(msg, undo) {
@@ -283,6 +297,7 @@
       return sess.rest && sess.name.toLowerCase() === 'rest' ? 'Counts automatically' : sess.name;
     }
     if (h.id === 'sleep') return `Target: ${fmtTime(s.bedtime)}`;
+    if (h.id === 'social') { const rep = repFor(k); return `Week ${rep.week}: ${rep.text}`; }
     return '';
   }
 
@@ -317,6 +332,7 @@
         <h1 class="num">${headline}</h1>
         <div class="bar"><i style="width:${pct}%"></i></div>
       </header>
+      ${rushLine() ? `<button class="rush-chip" data-action="go" data-to="social">${esc(rushLine())} ›</button>` : ''}
 
       <div class="stats">
         <div class="stat"><b>${streak()}</b><span>day streak</span></div>
@@ -694,6 +710,8 @@
         ${rows ? `<details class="workout"><summary>All weigh-ins ▾</summary><ul class="exlist">${rows}</ul></details>` : ''}
       </div>
 
+      ${socialStats()}
+
       <h2>History · tap a day to edit</h2>
       <div class="card">${calendar()}</div>
     `;
@@ -721,6 +739,286 @@
     svg.addEventListener('pointermove', show);
     svg.addEventListener('pointerdown', show);
     svg.addEventListener('pointerleave', () => { cross.style.display = 'none'; tip.hidden = true; });
+  }
+
+  // ---------- To-do ----------
+  const TODO_CATS = [
+    { id: 'asap', label: 'ASAP', empty: 'Nothing urgent.' },
+    { id: 'recurring', label: 'Recurring', empty: 'No recurring to-dos yet.' },
+    { id: 'soon', label: 'Soon-ish', empty: 'Nothing here yet.' },
+    { id: 'free', label: 'Free time', empty: 'Ideas for when you have time.' },
+  ];
+  const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
+  const daysLabel = days => {
+    const ds = days.slice().sort();
+    if (ds.length === 7) return 'Every day';
+    if (ds.join() === '1,2,3,4,5') return 'Weekdays';
+    if (ds.join() === '0,6') return 'Weekends';
+    return ds.map(d => DOW[d]).join(' · ');
+  };
+  const isDueOn = (t, k) => (t.days || ALL_DAYS).includes(parse(k).getDay());
+  const todoDone = (t, k) => (t.cat === 'recurring' ? !!(getDay(k).todos || {})[t.id] : !!t.done);
+  // Finished one-offs stay visible (struck through) until the day rolls over.
+  const todoVisible = (t, k) => t.cat === 'recurring' || !t.done || t.doneOn === k;
+  const dayPicker = days => `<div class="daypick">${DOW.map((d, i) => `<button class="${days.includes(i) ? 'on' : ''}" data-action="todo-day" data-d="${i}" aria-label="${DOW_LONG[i]}">${d}</button>`).join('')}</div>`;
+  const pickedDays = root => [...root.querySelectorAll('.daypick .on')].map(b => Number(b.dataset.d));
+
+  function todoRow(t, k) {
+    const due = t.cat !== 'recurring' || isDueOn(t, k);
+    const done = due && todoDone(t, k);
+    return `<div class="titem${done ? ' done' : ''}${due ? '' : ' later'}">
+      <button class="tcheck" data-action="todo-toggle" data-id="${esc(t.id)}"${due ? '' : ' disabled'} aria-pressed="${done}" aria-label="${done ? 'Mark not done' : 'Mark done'}"><span class="check">${CHECK_SVG}</span></button>
+      <button class="ttext" data-action="todo-edit" data-id="${esc(t.id)}">${esc(t.text)}${t.cat === 'recurring' ? `<small>${due ? '' : 'Not today · '}${daysLabel(t.days || ALL_DAYS)}</small>` : ''}</button>
+    </div>`;
+  }
+
+  function viewTodo() {
+    const k = curKey(), cat = ui.todoCat || 'asap';
+    const groups = TODO_CATS.map(c => {
+      const due = t => c.id !== 'recurring' || isDueOn(t, k);
+      const items = state.todos
+        .filter(t => t.cat === c.id && todoVisible(t, k))
+        .sort((a, b) => (due(b) - due(a)) || (todoDone(a, k) - todoDone(b, k)) || (a.ts - b.ts));
+      const left = items.filter(t => due(t) && !todoDone(t, k)).length;
+      return `<h2>${c.label} · <span class="num">${left}</span></h2>
+        <div class="tlist">${items.map(t => todoRow(t, k)).join('') || `<div class="empty">${c.empty}</div>`}</div>`;
+    }).join('');
+    return `
+      ${viewingBanner()}
+      <header class="dayhead"><div class="eyebrow">${fmtLong(k)}</div><h1>To-do</h1></header>
+      <div class="card">
+        <div class="row" style="gap:8px">
+          <input class="input grow" id="todo-text" placeholder="Add a to-do" autocomplete="off" aria-label="New to-do">
+          <button class="btn primary" data-action="todo-add">Add</button>
+        </div>
+        <div class="seg block-seg" style="margin-top:10px">${TODO_CATS.map(c => `<button class="${c.id === cat ? 'on' : ''}" data-action="todo-cat" data-cat="${c.id}">${c.label}</button>`).join('')}</div>
+        <div class="todo-days" style="margin-top:10px"${cat === 'recurring' ? '' : ' hidden'}>${dayPicker(ui.todoDays || ALL_DAYS)}</div>
+      </div>
+      ${groups}
+    `;
+  }
+
+  function todoSheet(id) {
+    const t = state.todos.find(x => x.id === id);
+    if (!t) return;
+    openSheet(`${sheetHead('Edit to-do')}
+      <label class="field"><span>To-do</span><input class="input" id="te-text" value="${esc(t.text)}"></label>
+      <div class="field"><span>Type</span>
+        <div class="seg block-seg">${TODO_CATS.map(c => `<button class="${c.id === t.cat ? 'on' : ''}" data-action="todo-cat" data-cat="${c.id}">${c.label}</button>`).join('')}</div>
+      </div>
+      <div class="field todo-days"${t.cat === 'recurring' ? '' : ' hidden'}><span>Repeats on</span>${dayPicker(t.days || ALL_DAYS)}</div>
+      <div class="grid2" style="margin-top:8px">
+        <button class="btn ghost" style="color:var(--danger)" data-action="todo-del" data-id="${esc(t.id)}">Delete</button>
+        <button class="btn primary" data-action="todo-save" data-id="${esc(t.id)}">Save</button>
+      </div>`);
+  }
+
+  // ---------- Social ----------
+  // [last week this applies to, challenge]
+  const REP_PLAN = [
+    [2, 'Small talk with one stranger'],
+    [4, 'Start one real conversation with someone you kind of know'],
+    [6, 'Make plans: invite someone to hang out or lift'],
+    [Infinity, 'Go to a group event and talk to 3 new people'],
+  ];
+  const PRE_EVENT = [
+    'Speak in the first 2 minutes',
+    'Stand in the circle, phone away',
+    'Learn + use 3 names',
+    'Get one detail per person',
+    'Pull someone else into a conversation',
+    'Go deep with at least 1 person',
+  ];
+  // Day 0 belongs to week 1.
+  const weekOf = k => Math.max(1, Math.ceil(dayNum(k) / 7));
+  const repFor = k => { const week = weekOf(k); return { week, text: REP_PLAN.find(([max]) => week <= max)[1] }; };
+  const ago = k => {
+    const n = diffDays(k, todayKey());
+    return n <= 0 ? 'today' : n === 1 ? 'yesterday' : n < 7 ? `${n} days ago` : fmtShort(k);
+  };
+  const stars = n => '★'.repeat(n) + '☆'.repeat(5 - n);
+  function rushLine() {
+    const r = state.settings.rushDate;
+    if (!r) return '';
+    const n = diffDays(todayKey(), r);
+    if (n > 1) return `${n} days to rush`;
+    if (n === 1) return 'Rush starts tomorrow';
+    if (n === 0) return 'Rush starts today';
+    return n >= -14 ? 'Rush is on' : '';
+  }
+  function shuffle(a) {
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  }
+  const findPerson = id => state.people.find(p => p.id === id);
+
+  function peopleList() {
+    const q = ui.peopleQuery.trim().toLowerCase();
+    const list = state.people
+      .filter(p => !q || [p.name, p.group, p.met, p.followUp, ...(p.details || [])].join(' ').toLowerCase().includes(q))
+      .sort((a, b) => (b.lastSeen || '').localeCompare(a.lastSeen || '') || (b.ts || 0) - (a.ts || 0));
+    if (!list.length) return `<div class="empty">${state.people.length ? 'No matches.' : 'No one yet. Add people as you meet them.'}</div>`;
+    return list.map(p => `<button class="person" data-action="person-open" data-id="${esc(p.id)}">
+        <div class="row spread"><b>${esc(p.name)}</b><span class="sub">${ago(p.lastSeen)}</span></div>
+        ${[p.group, ...(p.details || [])].filter(Boolean).length ? `<div class="sub">${esc([p.group, ...(p.details || [])].filter(Boolean).join(' · '))}</div>` : ''}
+        ${p.followUp ? `<div class="follow">Follow up: ${esc(p.followUp)}</div>` : ''}
+      </button>`).join('');
+  }
+
+  function viewSocial() {
+    const k = curKey(), d = getDay(k), rep = repFor(k), done = !!d.habits.social, rush = rushLine();
+    const recent = state.events.slice().sort((a, b) => b.k.localeCompare(a.k) || (b.ts || 0) - (a.ts || 0)).slice(0, 3);
+    return `
+      ${viewingBanner()}
+      <header class="dayhead"><div class="eyebrow">${rush ? esc(rush) : fmtLong(k)}</div><h1>Social</h1></header>
+
+      <div class="card">
+        <span class="tag">Week ${rep.week} · Today’s rep</span>
+        <div class="session-title" style="margin:2px 0 12px">${esc(rep.text)}</div>
+        <button class="habit rep-check${done ? ' on' : ''}" data-action="social-rep" aria-pressed="${done}">
+          <span class="check">${CHECK_SVG}</span><span class="label">${done ? 'Done' : 'Mark done'}</span>
+        </button>
+        <input class="input" style="margin-top:10px" placeholder="Note (optional): who, what happened" value="${esc(d.socialNote || '')}" data-social-note="${k}" aria-label="Social rep note">
+      </div>
+
+      <div class="grid2" style="margin-bottom:12px">
+        <button class="btn" data-action="pre-event">Pre-event checklist</button>
+        <button class="btn" data-action="debrief">Debrief</button>
+      </div>
+
+      <h2>People · <span class="num">${state.people.length}</span></h2>
+      <div class="row" style="margin-bottom:8px;gap:8px">
+        <input class="input grow" type="search" id="people-search" placeholder="Search names, details, groups" value="${esc(ui.peopleQuery)}" autocomplete="off" aria-label="Search people">
+        <button class="btn primary" data-action="person-new">+ Add</button>
+      </div>
+      ${state.people.length ? '<button class="btn block ghost" style="margin-bottom:8px" data-action="review">Review names (flashcards)</button>' : ''}
+      <div class="people" id="people-list">${peopleList()}</div>
+
+      ${recent.length ? `<h2>Recent events</h2><div class="log">${recent.map(e => `<div class="log-item">
+          <div class="grow"><b>${esc(e.name || 'Event')} <span class="stars">${stars(e.rating)}</span></b>
+            <span>${fmtShort(e.k)}${e.well ? ` · Went well: ${esc(e.well)}` : ''}${e.next ? ` · Next: ${esc(e.next)}` : ''}</span></div>
+          <button class="icon-btn plain" data-action="event-del" data-id="${esc(e.id)}" aria-label="Delete event">✕</button>
+        </div>`).join('')}</div>` : ''}
+    `;
+  }
+
+  function personForm(p, presetMet) {
+    const det = (p && p.details) || [];
+    const hints = ['Major / hometown', 'Sport / interest', 'Something they mentioned'];
+    const n = Math.max(3, det.length);
+    openSheet(`${sheetHead(p ? 'Edit person' : 'Add person')}
+      <label class="field"><span>Name</span><input class="input" id="pf-name" value="${esc(p ? p.name : '')}" autocomplete="off" autocapitalize="words"></label>
+      <label class="field"><span>Where / when you met</span><input class="input" id="pf-met" value="${esc(p ? p.met || '' : presetMet || '')}" placeholder="e.g. Dining hall, Oct 25"></label>
+      <label class="field"><span>House / group (optional)</span><input class="input" id="pf-group" value="${esc(p ? p.group || '' : '')}" placeholder="e.g. a fraternity, club soccer"></label>
+      <div class="field"><span>Details to remember</span>
+        <div class="stack">${Array.from({ length: n }, (_, i) => `<input class="input pf-detail" value="${esc(det[i] || '')}" placeholder="${hints[i] || 'Another detail'}" aria-label="Detail ${i + 1}">`).join('')}</div>
+      </div>
+      <label class="field"><span>Follow-up (optional)</span><input class="input" id="pf-follow" value="${esc(p ? p.followUp || '' : '')}" placeholder="e.g. ask how his midterm went"></label>
+      <button class="btn primary block" data-action="person-save" data-id="${p ? esc(p.id) : ''}">${p ? 'Save' : 'Add person'}</button>`, true);
+    if (!p) setTimeout(() => $('#pf-name') && $('#pf-name').focus(), 50);
+  }
+
+  function personSheet(id, seenMode) {
+    const p = findPerson(id);
+    if (!p) return;
+    const times = (p.seen || []).length + 1;
+    openSheet(`${sheetHead(esc(p.name))}
+      <div class="card">
+        ${p.group ? `<span class="tag">${esc(p.group)}</span>` : ''}
+        ${p.met ? `<div class="sub">Met: ${esc(p.met)}</div>` : ''}
+        <div class="sub">Last seen ${ago(p.lastSeen)}${times > 1 ? ` · seen ${times} times` : ''}</div>
+        ${(p.details || []).length ? `<ul class="detail-list">${p.details.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+        ${p.followUp ? `<div class="hint-box"><b>Follow up</b>${esc(p.followUp)}</div>` : ''}
+      </div>
+      ${seenMode ? `<div class="card">
+          <label class="field"><span>New detail (optional)</span><input class="input" id="seen-detail" placeholder="Something new you learned"></label>
+          <label class="field"><span>Next follow-up (optional)</span><input class="input" id="seen-follow" value="${esc(p.followUp || '')}"></label>
+          <button class="btn primary block" data-action="seen-save" data-id="${esc(p.id)}">Save: seen today</button>
+        </div>` : `<button class="btn primary block" data-action="seen-again" data-id="${esc(p.id)}">Seen again</button>`}
+      <div class="grid2" style="margin-top:8px">
+        <button class="btn" data-action="person-edit" data-id="${esc(p.id)}">Edit</button>
+        <button class="btn ghost" style="color:var(--danger)" data-action="person-del" data-id="${esc(p.id)}">Delete</button>
+      </div>`);
+    if (seenMode) setTimeout(() => $('#seen-detail') && $('#seen-detail').focus(), 50);
+  }
+
+  function reviewSheet() {
+    const rv = ui.review, total = rv.order.length;
+    if (rv.i >= total) {
+      openSheet(`${sheetHead('Review done')}
+        <div class="card" style="text-align:center"><div class="timer">${rv.right}/${total}</div><div class="sub">names recalled</div></div>
+        <div class="grid2"><button class="btn" data-action="review">Go again</button><button class="btn primary" data-action="close-sheet">Done</button></div>`, true);
+      return;
+    }
+    const p = findPerson(rv.order[rv.i]);
+    const details = (p.details || []).map(x => `<div>${esc(x)}</div>`).join('') || '<div class="sub">No details saved</div>';
+    const ctx = [p.group, p.met].filter(Boolean).join(' · ');
+    openSheet(`${sheetHead(`Review · ${rv.i + 1} of ${total}`)}
+      <button class="flashcard" data-action="review-flip" aria-label="${rv.flipped ? 'Name shown' : 'Tap to reveal name'}">
+        ${rv.flipped ? `<div class="fc-name">${esc(p.name)}</div>` : ''}
+        <div class="fc-details">${details}</div>
+        ${ctx ? `<div class="sub" style="margin-top:12px">${esc(ctx)}</div>` : ''}
+        ${rv.flipped ? '' : '<div class="sub" style="margin-top:24px">Who is this? Tap to reveal</div>'}
+      </button>
+      ${rv.flipped ? `<div class="grid2" style="margin-top:12px">
+          <button class="btn" data-action="review-next" data-ok="0">Missed it</button>
+          <button class="btn primary" data-action="review-next" data-ok="1">Got it</button>
+        </div>` : ''}`, true);
+  }
+
+  function preEventSheet() {
+    const t = todayKey();
+    if (!state.preEvent || state.preEvent.k !== t) state.preEvent = { k: t, done: [] };
+    const pe = state.preEvent;
+    openSheet(`${sheetHead('Pre-event')}
+      <p class="sub" style="margin:-8px 0 12px;font-size:15px">Read it before you walk in. Check things off as you go.</p>
+      <div class="habits">${PRE_EVENT.map((x, i) => `<button class="habit${pe.done.includes(i) ? ' on' : ''}" data-action="pre-toggle" data-i="${i}">
+          <span class="check">${CHECK_SVG}</span><span class="label">${x}</span></button>`).join('')}</div>
+      <button class="btn primary block" style="margin-top:12px" data-action="debrief">Done? Debrief</button>`, true);
+  }
+
+  function debriefSheet() {
+    ui.debrief = { rating: 0 };
+    openSheet(`${sheetHead('Debrief')}
+      <label class="field"><span>Event (optional)</span><input class="input" id="db-name" placeholder="e.g. Rush night, party on Elm St"></label>
+      <div class="field"><span>How did it go?</span>
+        <div class="rating">${[1, 2, 3, 4, 5].map(n => `<button data-action="db-rate" data-n="${n}" aria-label="${n} out of 5">${n}</button>`).join('')}</div>
+      </div>
+      <label class="field"><span>One thing that went well</span><input class="input" id="db-well"></label>
+      <label class="field"><span>One thing to try next time</span><input class="input" id="db-next"></label>
+      <button class="btn primary block" data-action="db-save">Save debrief</button>`, true);
+  }
+
+  function addAnotherSheet(title) {
+    openSheet(`${sheetHead(title)}
+      <p class="sub" style="font-size:15px;margin:0 0 16px">Add people while their names are fresh.</p>
+      <div class="stack">
+        <button class="btn primary block" data-action="person-new" data-from-event="1">+ Add someone you met</button>
+        <button class="btn block ghost" data-action="close-sheet">Done</button>
+      </div>`);
+  }
+
+  // Per-week social numbers for the Progress tab.
+  function socialWeeks() {
+    const t = todayKey();
+    const curW = Math.min(weekOf(t < endKey() ? t : endKey()), weekOf(endKey()));
+    const weeks = Array.from({ length: curW }, (_, i) => ({ w: i + 1, reps: 0, people: 0, events: 0, ratings: [] }));
+    const at = k => (k && dayNum(k) >= 0 && k <= t ? weeks[Math.min(weekOf(k), curW) - 1] : null);
+    for (const [k, d] of Object.entries(state.days)) { const wk = at(k); if (wk && d.habits && d.habits.social) wk.reps++; }
+    for (const p of state.people) { const wk = at(p.created); if (wk) wk.people++; }
+    for (const e of state.events) { const wk = at(e.k); if (wk) { wk.events++; wk.ratings.push(e.rating); } }
+    return weeks;
+  }
+  function socialStats() {
+    const rows = socialWeeks().map(w => {
+      const avg = w.ratings.length ? w.ratings.reduce((a, b) => a + b, 0) / w.ratings.length : null;
+      return `<tr><td>${w.w}</td><td>${w.reps}</td><td>${w.people}</td><td>${w.events}</td>
+        <td>${avg == null ? '<span class="sub">—</span>' : `<span class="meter" aria-hidden="true"><i style="width:${avg / 5 * 100}%"></i></span>${avg.toFixed(1)}`}</td></tr>`;
+    }).join('');
+    return `<h2>Social · by week</h2>
+      <div class="card"><table class="wk num">
+        <thead><tr><th>Week</th><th>Reps</th><th>New people</th><th>Events</th><th>Avg rating</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
   }
 
   // ---------- Settings ----------
@@ -760,6 +1058,7 @@
           <label class="field"><span>Start (Day 0)</span><input class="input" type="date" value="${s.startDate}" data-setting="startDate"></label>
           <label class="field"><span>End date</span><input class="input" type="date" value="${s.endDate}" data-setting="endDate"></label>
           <label class="field"><span>Bedtime target</span><input class="input" type="time" value="${s.bedtime}" data-setting="bedtime"></label>
+          <label class="field"><span>Rush starts</span><input class="input" type="date" value="${s.rushDate || ''}" data-setting="rushDate"></label>
         </div>
         <div class="sub">Day 0 is ${fmtDay(startKey())}, Day ${lastDay()} is ${fmtDay(endKey())}. Days roll over at 4 AM.</div>
       </div>
@@ -883,17 +1182,116 @@
     toast(`Urge ridden out. That’s ${state.urgesBeaten}.`);
   }
 
+  // ---------- Tab wheel ----------
+  // The tabs sit on an arc that wraps around like a dial: swipe to spin, the center tab is the open screen.
+  const TABS = [
+    { id: 'today', label: 'Today', icon: '<path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/>' },
+    { id: 'food', label: 'Food', icon: '<path d="M7 3v8a2 2 0 0 0 2 2v8M5 3v6M9 3v6M17 21V3c-2 0-3 3-3 7s1 4 3 4"/>' },
+    { id: 'train', label: 'Train', icon: '<path d="M3 10v4M6 7v10M18 7v10M21 10v4M6 12h12"/>' },
+    { id: 'todo', label: 'To-do', icon: '<path d="M10 6h10M10 12h10M10 18h10"/><path d="M3.5 6l1.5 1.5L7.5 5M3.5 12l1.5 1.5 2.5-2.5M3.5 18l1.5 1.5 2.5-2.5"/>' },
+    { id: 'social', label: 'Social', icon: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.5A6.5 6.5 0 0 1 21.5 20"/>' },
+    { id: 'progress', label: 'Progress', icon: '<path d="M3 17l6-6 4 4 8-8M15 7h6v6"/>' },
+    { id: 'settings', label: 'Settings', icon: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>' },
+  ];
+  const NT = TABS.length;
+  const STEP = 25 * Math.PI / 180; // angle between neighbouring tabs on the dial
+  const wheelEl = $('#wheel');
+  const wheel = { pos: 0, target: null, raf: 0, drag: null };
+  const wrapIdx = i => ((i % NT) + NT) % NT;
+  const radius = () => Math.min(window.innerWidth, 560) * 0.46;
+  const stepPx = () => radius() * Math.sin(STEP);
+  const nearest = i => wheel.pos + (wrapIdx(i - wheel.pos + NT / 2) - NT / 2); // same tab, shortest way round
+
+  wheelEl.innerHTML = '<span class="wheel-slot" aria-hidden="true"></span>' + TABS.map((t, i) =>
+    `<button class="tab" data-tab="${t.id}" data-i="${i}"><svg viewBox="0 0 24 24" aria-hidden="true">${t.icon}</svg><span>${t.label}</span></button>`).join('');
+  const wheelItems = [...wheelEl.querySelectorAll('.tab')];
+
+  function layoutWheel() {
+    const R = radius();
+    wheelItems.forEach((el, i) => {
+      const d = wrapIdx(i - wheel.pos + NT / 2) - NT / 2;
+      const a = d * STEP, ad = Math.abs(d);
+      el.style.transform = `translate(-50%, 0) translate(${(R * Math.sin(a)).toFixed(1)}px, ${(R * (1 - Math.cos(a))).toFixed(1)}px) rotate(${a.toFixed(3)}rad) scale(${(1 - Math.min(ad, 3) * 0.08).toFixed(3)})`;
+      el.style.opacity = Math.max(0, 1 - ad / 3.2).toFixed(2);
+      const reachable = ad < 2.6;
+      el.style.pointerEvents = reachable ? '' : 'none';
+      el.tabIndex = reachable ? 0 : -1;
+      el.classList.toggle('on', ad < 0.5);
+      el.setAttribute('aria-current', el.dataset.tab === ui.tab ? 'page' : 'false');
+    });
+  }
+
+  function spinTo(target) {
+    cancelAnimationFrame(wheel.raf);
+    wheel.target = target;
+    const from = wheel.pos, t0 = performance.now(), dur = 280;
+    const tick = now => {
+      const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+      wheel.pos = from + (target - from) * e;
+      layoutWheel();
+      if (p < 1) wheel.raf = requestAnimationFrame(tick);
+      else { wheel.pos = wrapIdx(target); wheel.target = null; layoutWheel(); }
+    };
+    wheel.raf = requestAnimationFrame(tick);
+  }
+  // Spin to a tab and open it right away (the view doesn't wait for the animation).
+  function selectTab(i) {
+    const target = Math.round(nearest(i));
+    spinTo(target);
+    const id = TABS[wrapIdx(target)].id;
+    if (id !== ui.tab) go(id);
+  }
+  // Keep the dial in step when a view is opened some other way (buttons, calendar).
+  function syncWheel() {
+    const i = TABS.findIndex(t => t.id === ui.tab);
+    const aimed = wheel.target != null ? wrapIdx(wheel.target) : wrapIdx(Math.round(wheel.pos));
+    if (aimed !== i || (wheel.target == null && Math.abs(wheel.pos - Math.round(wheel.pos)) > 0.01)) spinTo(Math.round(nearest(i)));
+    else layoutWheel();
+  }
+
+  wheelEl.addEventListener('pointerdown', e => {
+    cancelAnimationFrame(wheel.raf); wheel.target = null;
+    wheel.drag = { x: e.clientX, pos: wheel.pos, moved: false, last: e.clientX, t: performance.now(), v: 0, tick: Math.round(wheel.pos), tab: e.target.closest('.tab') };
+    wheelEl.setPointerCapture(e.pointerId);
+  });
+  wheelEl.addEventListener('pointermove', e => {
+    const dr = wheel.drag;
+    if (!dr) return;
+    const dx = e.clientX - dr.x;
+    if (!dr.moved && Math.abs(dx) < 6) return;
+    dr.moved = true;
+    const now = performance.now();
+    dr.v = 0.7 * dr.v + 0.3 * ((e.clientX - dr.last) / Math.max(1, now - dr.t));
+    dr.last = e.clientX; dr.t = now;
+    wheel.pos = dr.pos - dx / stepPx();
+    const notch = Math.round(wheel.pos);
+    if (notch !== dr.tick) { dr.tick = notch; try { navigator.vibrate && navigator.vibrate(4); } catch (err) {} }
+    layoutWheel();
+  });
+  const endDrag = () => {
+    const dr = wheel.drag;
+    if (!dr) return;
+    wheel.drag = null;
+    if (!dr.moved) { if (dr.tab) selectTab(Number(dr.tab.dataset.i)); else syncWheel(); return; }
+    const fling = clamp((-dr.v * 140) / stepPx(), -2, 2); // a quick flick carries up to 2 extra tabs
+    selectTab(Math.round(wheel.pos + fling));
+  };
+  wheelEl.addEventListener('pointerup', endDrag);
+  wheelEl.addEventListener('pointercancel', endDrag);
+  wheelEl.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    selectTab(TABS.findIndex(t => t.id === ui.tab) + (e.key === 'ArrowRight' ? 1 : -1));
+  });
+  window.addEventListener('resize', layoutWheel);
+
   // ---------- Render ----------
-  const VIEWS = { today: viewToday, food: viewFood, train: viewTrain, progress: viewProgress, settings: viewSettings };
+  const VIEWS = { today: viewToday, food: viewFood, train: viewTrain, todo: viewTodo, social: viewSocial, progress: viewProgress, settings: viewSettings };
   function render() {
     ui.lastToday = todayKey();
-    document.querySelectorAll('.tab').forEach(t => {
-      const on = t.dataset.tab === ui.tab;
-      t.classList.toggle('on', on);
-      t.setAttribute('aria-current', on ? 'page' : 'false');
-    });
     view.innerHTML = VIEWS[ui.tab]();
     if (ui.tab === 'progress') bindChart();
+    syncWheel();
   }
   function go(tab) {
     ui.tab = tab;
@@ -909,8 +1307,9 @@
   // ---------- Events ----------
   document.addEventListener('click', e => {
     if (e.target.classList.contains('overlay')) { closeSheet(); return; }
+    // Wheel taps are handled by its pointer events; this only catches keyboard "clicks".
     const tab = e.target.closest('.tab');
-    if (tab) { go(tab.dataset.tab); return; }
+    if (tab) { if (e.detail === 0) selectTab(Number(tab.dataset.i)); return; }
     const el = e.target.closest('[data-action]');
     if (!el) return;
     const a = el.dataset.action, k = curKey();
@@ -1060,6 +1459,157 @@
         break;
       }
       case 'urge-open': openUrge(); break;
+      case 'todo-cat': {
+        const root = el.closest('.sheet') || view;
+        root.querySelectorAll('[data-action="todo-cat"]').forEach(b => b.classList.toggle('on', b === el));
+        root.querySelector('.todo-days').hidden = el.dataset.cat !== 'recurring';
+        if (!el.closest('.sheet')) ui.todoCat = el.dataset.cat;
+        break;
+      }
+      case 'todo-day':
+        el.classList.toggle('on');
+        if (!el.closest('.sheet')) ui.todoDays = pickedDays(view);
+        break;
+      case 'todo-add': {
+        const input = $('#todo-text'), text = input.value.trim(), cat = ui.todoCat || 'asap';
+        if (!text) { input.focus(); break; }
+        const t = { id: uid(), text, cat, ts: Date.now() };
+        if (cat === 'recurring') {
+          t.days = pickedDays(view);
+          if (!t.days.length) { toast('Pick at least one day'); break; }
+        }
+        state.todos.push(t);
+        save(); buzz(); render();
+        $('#todo-text').focus(); // keep the keyboard up for the next one
+        break;
+      }
+      case 'todo-toggle': {
+        const t = state.todos.find(x => x.id === el.dataset.id);
+        if (!t) break;
+        if (t.cat === 'recurring') {
+          const d = day(k);
+          d.todos = d.todos || {};
+          if (d.todos[t.id]) delete d.todos[t.id]; else d.todos[t.id] = true;
+        } else {
+          t.done = !t.done;
+          t.doneOn = t.done ? k : undefined;
+        }
+        save(); buzz(); render();
+        break;
+      }
+      case 'todo-edit': todoSheet(el.dataset.id); break;
+      case 'todo-save': {
+        const t = state.todos.find(x => x.id === el.dataset.id);
+        if (!t) break;
+        const sheet = $('.sheet'), text = $('#te-text').value.trim();
+        const cat = sheet.querySelector('[data-action="todo-cat"].on').dataset.cat;
+        if (!text) { toast('Add some text'); break; }
+        if (cat === 'recurring') {
+          const days = pickedDays(sheet);
+          if (!days.length) { toast('Pick at least one day'); break; }
+          t.days = days;
+        } else if (t.cat === 'recurring') { t.done = false; delete t.days; }
+        t.text = text; t.cat = cat;
+        save(); closeSheet(); toast('Saved');
+        break;
+      }
+      case 'todo-del': {
+        const snap = snapshot();
+        state.todos = state.todos.filter(x => x.id !== el.dataset.id);
+        save(); closeSheet(); toast('To-do deleted', restorer(snap));
+        break;
+      }
+      case 'social-rep': {
+        const d = day(k);
+        d.habits.social = !d.habits.social;
+        save(); buzz(); render();
+        if (d.habits.social && isComplete(k)) toast(k === todayKey() ? `All done. ${plural(streak(), 'day')} streak 🔥` : 'Day complete ✓');
+        break;
+      }
+      case 'person-new':
+        ui.fromEvent = el.dataset.fromEvent === '1' ? ui.fromEvent : null;
+        personForm(null, ui.fromEvent);
+        break;
+      case 'person-edit': personForm(findPerson(el.dataset.id)); break;
+      case 'person-open': personSheet(el.dataset.id); break;
+      case 'seen-again': personSheet(el.dataset.id, true); break;
+      case 'person-save': {
+        const name = $('#pf-name').value.trim();
+        if (!name) { toast('Add a name'); $('#pf-name').focus(); break; }
+        const fields = {
+          name,
+          met: $('#pf-met').value.trim(),
+          group: $('#pf-group').value.trim(),
+          details: [...document.querySelectorAll('.pf-detail')].map(i => i.value.trim()).filter(Boolean),
+          followUp: $('#pf-follow').value.trim(),
+        };
+        const existing = el.dataset.id && findPerson(el.dataset.id);
+        if (existing) Object.assign(existing, fields);
+        else state.people.push({ id: uid(), ...fields, created: todayKey(), lastSeen: todayKey(), seen: [], ts: Date.now() });
+        save();
+        if (!existing && ui.fromEvent) addAnotherSheet(`Added ${name}`);
+        else { closeSheet(); toast(existing ? 'Saved' : `Added ${name}`); }
+        break;
+      }
+      case 'seen-save': {
+        const p = findPerson(el.dataset.id);
+        if (!p) break;
+        const detail = $('#seen-detail').value.trim();
+        if (detail) p.details = [...(p.details || []), detail];
+        p.followUp = $('#seen-follow').value.trim();
+        p.seen = [...(p.seen || []), { k: todayKey(), note: detail }];
+        p.lastSeen = todayKey(); p.ts = Date.now();
+        save(); closeSheet(); toast(`Saw ${p.name} again`);
+        break;
+      }
+      case 'person-del': {
+        const p = findPerson(el.dataset.id);
+        if (!p) break;
+        confirmSheet(`Delete ${esc(p.name)}?`, 'This removes them and their details from your People log.', 'Delete', () => {
+          state.people = state.people.filter(x => x.id !== p.id);
+          save(); render(); toast('Deleted');
+        }, true);
+        break;
+      }
+      case 'review':
+        ui.review = { order: shuffle(state.people.map(p => p.id)), i: 0, flipped: false, right: 0 };
+        reviewSheet();
+        break;
+      case 'review-flip': if (!ui.review.flipped) { ui.review.flipped = true; reviewSheet(); } break;
+      case 'review-next':
+        if (el.dataset.ok === '1') ui.review.right++;
+        ui.review.i++; ui.review.flipped = false;
+        reviewSheet();
+        break;
+      case 'pre-event': preEventSheet(); break;
+      case 'pre-toggle': {
+        const pe = state.preEvent, i = Number(el.dataset.i);
+        pe.done = pe.done.includes(i) ? pe.done.filter(x => x !== i) : [...pe.done, i];
+        save(); buzz();
+        el.classList.toggle('on', pe.done.includes(i));
+        break;
+      }
+      case 'debrief': debriefSheet(); break;
+      case 'db-rate':
+        ui.debrief.rating = Number(el.dataset.n);
+        document.querySelectorAll('[data-action="db-rate"]').forEach(b => b.classList.toggle('on', Number(b.dataset.n) === ui.debrief.rating));
+        break;
+      case 'db-save': {
+        if (!ui.debrief || !ui.debrief.rating) { toast('Rate it 1–5 first'); break; }
+        const ev = { id: uid(), k: todayKey(), name: $('#db-name').value.trim(), rating: ui.debrief.rating,
+          well: $('#db-well').value.trim(), next: $('#db-next').value.trim(), ts: Date.now() };
+        state.events.push(ev);
+        save();
+        ui.fromEvent = `${ev.name || 'Event'}, ${fmtShort(ev.k)}`;
+        addAnotherSheet('Debrief saved ✓');
+        break;
+      }
+      case 'event-del': {
+        const snap = snapshot();
+        state.events = state.events.filter(e => e.id !== el.dataset.id);
+        save(); render(); toast('Event deleted', restorer(snap));
+        break;
+      }
       case 'urge-toggle':
         if (urge.end) { urge.remaining = urgeLeft(); urge.end = null; stopUrgeTick(); el.textContent = 'Resume'; }
         else { urge.end = Date.now() + urge.remaining; startUrgeTick(); el.textContent = 'Pause'; }
@@ -1075,6 +1625,11 @@
   // Workout set inputs save as you type, without re-rendering (keeps focus).
   document.addEventListener('input', e => {
     const el = e.target;
+    if (el.id === 'people-search') {
+      ui.peopleQuery = el.value;
+      $('#people-list').innerHTML = peopleList();
+      return;
+    }
     if (el.dataset.set == null) return;
     const k = curKey(), ex = sessionFor(k).ex[Number(el.dataset.ex)];
     const d = day(k);
@@ -1101,8 +1656,13 @@
         if (!el.value || next.endDate <= next.startDate) { toast('End date must be after the start date'); render(); return; }
         s[key] = el.value;
       } else if (key === 'bedtime') { if (el.value) s[key] = el.value; }
+      else if (key === 'rushDate') s.rushDate = el.value;
       else if (num(el.value) > 0) s[key] = num(el.value);
       save(); render();
+    } else if (el.dataset.socialNote) {
+      const d = day(el.dataset.socialNote), v = el.value.trim();
+      if (v) d.socialNote = v; else delete d.socialNote;
+      save();
     } else if (el.dataset.sch != null) {
       const sc = state.schedule[Number(el.dataset.sch)], key = el.dataset.key;
       if (el.dataset.ei == null) {
@@ -1137,6 +1697,7 @@
     if (e.key === 'Enter' && e.target.matches('input')) {
       if (e.target.closest('.sheet') && e.target.id && e.target.id.startsWith('cf-')) $('[data-action="food-custom-add"]').click();
       else if (e.target.id === 'new-habit') $('[data-action="habit-add"]').click();
+      else if (e.target.id === 'todo-text') $('[data-action="todo-add"]').click();
       else e.target.blur();
     }
     if (e.key === 'Escape' && $('#sheet-root').innerHTML) closeSheet();

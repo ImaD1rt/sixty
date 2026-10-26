@@ -1,5 +1,5 @@
 // Bump VERSION whenever you change any app file so phones pick up the update.
-const VERSION = 'sixty-v4';
+const VERSION = 'sixty-v6';
 const ASSETS = [
   './',
   './index.html',
