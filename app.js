@@ -1142,6 +1142,20 @@
     if (e.key === 'Escape' && $('#sheet-root').innerHTML) closeSheet();
   });
 
+  // Hide the tab bar while typing (iOS floats fixed bars above the keyboard otherwise).
+  const isField = el => el && el.matches && el.matches('input:not([type="checkbox"]):not([type="file"]), select, textarea');
+  document.addEventListener('focusin', e => { if (isField(e.target)) document.body.classList.add('typing'); });
+  document.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (isField(document.activeElement)) return;
+      document.body.classList.remove('typing');
+      window.scrollTo(window.scrollX, window.scrollY); // nudge iOS to reset the viewport after the keyboard closes
+    }, 50);
+  });
+
+  // Block pinch-zoom on iOS, which ignores user-scalable=no in some cases.
+  document.addEventListener('gesturestart', e => e.preventDefault());
+
   // Roll over to the new day if the app was left open past midnight.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && ui.lastToday !== todayKey()) { ui.viewDate = null; render(); }

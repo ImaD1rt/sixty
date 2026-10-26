@@ -37,7 +37,12 @@
 }
 
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+/* App-like touch: no double-tap zoom or tap delay. */
+html { -webkit-text-size-adjust: 100%; touch-action: manipulation; }
+button, a, input, select, label { touch-action: manipulation; }
+
+/* While the keyboard is open, hide the bottom bar so iOS doesn't push it up above the keys. */
+body.typing .tabbar, body.typing .urge-pill { display: none; }
 body {
   margin: 0;
   background: var(--bg);
